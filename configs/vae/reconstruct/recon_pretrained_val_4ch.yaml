@@ -1,0 +1,36 @@
+experiment_name: recon_pretrained_val_4ch
+
+data:
+  root: "../data/uwf/multilabel/MedicalCheckup/splitted"
+  split: "val"
+  classes:
+    - H1
+    - H2
+    - H3
+    - H4
+    - DME
+    - nAMD
+
+sampling:
+  num_samples: 32
+  mode: "first"
+  seed: 42
+
+vae:
+  type: "sdxl_pretrained"
+  repo_id: "stabilityai/sdxl-vae"
+  dtype: "fp32"
+  device: "cuda"
+  gpu_ids: [2]  
+
+image:
+  center_crop_size: 3072
+  image_size: 1024
+
+inference:
+  batch_size: 8
+  num_workers: 4
+
+output:
+  root_dir: "outputs/reconstructions"
+  side_by_side: true  # true: original+recon, false: recon only
