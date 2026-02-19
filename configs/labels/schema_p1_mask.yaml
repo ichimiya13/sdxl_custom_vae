@@ -1,0 +1,82 @@
+name: "pattern1_raw"
+group_reduce: "any"
+classes:
+  - "白内障"
+  - "硝子体混濁"
+  - "星状硝子体症"
+  - "VH"
+  - "MH"
+  - "分層黄斑円孔"
+  - "黄斑偽円孔"
+  - "黄斑偽円孔術後"
+  - "黄斑円孔術後"
+  - "黄斑円孔PC後"
+  - "網膜円孔"
+  - "網膜萎縮性円孔"
+  - "網膜円孔PC後"
+  - "網膜裂孔"
+  - "lattice"
+  - "lattice(PC後)"
+  - "網膜裂孔PC後"
+  - "網膜裂孔術後"
+  - "RRD"
+  - "RD術後"
+  - "黄斑変性"
+  - "nAMD"
+  - "PCV"
+  - "ドルーゼン(drusen)"
+  - "CSC"
+  - "糖尿病網膜症"
+  - "mild_NPDR"
+  - "moderate_NPDR"
+  - "severe_NPDR"
+  - "PDR"
+  - "DME"
+  - "PRP"
+  - "レーザー後"
+  - "網膜静脈分枝閉塞"
+  - "BRVO_PC後"
+  - "網膜中心静脈閉塞"
+  - "眼底出血"
+  - "網膜変性"
+  - "網膜色素変性"
+  - "網脈絡膜変性"
+  - "網脈絡膜萎縮"
+  - "強度近視眼底"
+  - "コーヌス"
+  - "ERM"
+  - "ERM術後"
+  - "緑内障(gla)"
+  - "視神経乳頭陥凹拡大"
+  - "uveitis"
+  - "サルコイドーシス"
+  - "眼内悪性リンパ腫"
+  - "硬性白斑"
+  - "有髄神経線維"
+  - "S1"
+  - "S2"
+  - "S3"
+  - "S4"
+  - "H1"
+  - "H2"
+  - "H3"
+  - "H4"
+
+label_groups: {}
+
+mask:
+  enabled: true
+  threshold: 0.5
+
+  # このラベルが 1 なら無条件にサンプル除外（常に除外）
+  drop_samples_if_any_positive:
+    - "眼底以外"
+    - "眼底判定困難"
+
+  # 不整合サンプル除外：異常なし=1 なのに他にも陽性がある
+  drop_samples_if_label_coexists:
+    - label: "異常なし"
+      with_any_other_positive: true
+
+  # 共存チェックから除外したいラベル（必要になったら追加）
+  coexist_ignore_labels: []

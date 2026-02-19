@@ -1,0 +1,42 @@
+experiment_name: "analyze_p1_p2_p3_p4_groups_test_ref_p4"
+
+data:
+  root: "../data/uwf/multilabel/MedicalCheckup/splitted"
+  split_filename: "default_split.yaml"
+  split: "test"
+  label_suffix: ".yaml"
+  mean: [0.485, 0.456, 0.406]
+  std:  [0.229, 0.224, 0.225]
+
+image:
+  center_crop_size: 3072
+  image_size: 1024
+
+models:
+  p1:
+    schema: "configs/labels/schema_p1.yaml"
+    checkpoint: "outputs/checkpoints/teacher/teacher_convnextl_1024_p1/best.pt"
+  p2:
+    schema: "configs/labels/schema_p2.yaml"
+    checkpoint: "outputs/checkpoints/teacher/teacher_convnextl_1024_p2_imgnetstd_lr3e-5_wd01/best.pt"
+  p3:
+    schema: "configs/labels/schema_p3.yaml"
+    checkpoint: "outputs/checkpoints/teacher/teacher_convnextl_1024_p3/best.pt"
+  p4:
+    schema: "configs/labels/schema_p4.yaml"
+    checkpoint: "outputs/checkpoints/teacher/teacher_convnextl_1024_p4/best.pt"
+
+inference:
+  gpu_id: 4
+  batch_size: 16
+  num_workers: 8
+  pin_memory: true
+
+analysis:
+  reference_model: "p4"              # ← p4のlabel_groupsを比較の軸にする
+  aggregate_methods: ["max"]         # noisy_or を使わないなら max だけでOK
+  # groups_include: ["網膜裂孔", "網膜円孔", "MH", "黄斑変性", "NPDR"]  # 必要なら絞る
+
+output:
+  root_dir: "outputs/analysis/group_compare"
+  float_precision: 3

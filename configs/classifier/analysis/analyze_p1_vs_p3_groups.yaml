@@ -1,0 +1,36 @@
+experiment_name: "analyze_p1_vs_p3_groups_test"
+
+data:
+  root: "../data/uwf/multilabel/MedicalCheckup/splitted"
+  split_filename: "default_split.yaml"
+  test_split: "test"
+  label_suffix: ".yaml"
+  # 推論時の正規化（あなたの結論通り ImageNet 推奨）
+  mean: [0.485, 0.456, 0.406]
+  std:  [0.229, 0.224, 0.225]
+
+image:
+  center_crop_size: 3072
+  image_size: 1024
+
+models:
+  p1:
+    schema: "configs/labels/schema_p1.yaml"
+    checkpoint: "outputs/checkpoints/teacher/teacher_convnextl_1024_p1/best.pt"
+  p3:
+    schema: "configs/labels/schema_p3.yaml"
+    checkpoint: "outputs/checkpoints/teacher/teacher_convnextl_1024_p3/best.pt"
+
+inference:
+  gpu_id: 5
+  batch_size: 16
+  num_workers: 8
+  pin_memory: true
+
+analysis:
+  # p3 schema の label_groups 全部を解析（必要なら groups_include で絞れる）
+  # groups_include: ["網膜裂孔", "網膜円孔", "MH", "黄斑変性", "NPDR"]
+  p1_aggregate_methods: ["max", "noisy_or"]
+
+output:
+  root_dir: "outputs/analysis/p1_vs_p3_groups"
