@@ -13,8 +13,8 @@ from torch.utils.data import DataLoader, Subset
 from torchvision import transforms as T
 from torchvision.utils import save_image
 
-from src.datasets.image_dataset import MultiLabelMedicalDataset
-from src.sdxl.load_sdxl_vae import SDXLVAEConfig, load_sdxl_vae
+from src.sdxl_custom_vae.datasets.image_dataset import MultiLabelMedicalDataset
+from src.sdxl_custom_vae.sdxl.load_sdxl_vae import SDXLVAEConfig, load_sdxl_vae
 
 
 class VAEReconstructionWrapper(nn.Module):

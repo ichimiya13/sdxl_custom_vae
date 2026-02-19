@@ -10,8 +10,8 @@ from torch.utils.data import DataLoader
 from torchvision import transforms as T
 from torchvision.utils import save_image
 
-from src.datasets.image_dataset import MultiLabelMedicalDataset
-from src.sdxl.load_sdxl_vae import load_sdxl_vae, SDXLVAEConfig
+from src.sdxl_custom_vae.datasets.image_dataset import MultiLabelMedicalDataset
+from src.sdxl_custom_vae.sdxl.load_sdxl_vae import load_sdxl_vae, SDXLVAEConfig
 
 
 def build_vae_transform(

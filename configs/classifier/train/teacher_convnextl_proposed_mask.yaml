@@ -1,0 +1,74 @@
+experiment_name: "teacher_convnextl_proposed_mask"
+seed: 42
+
+data:
+  root: "../data/uwf/multilabel/MedicalCheckup/splitted"
+  train_split: "train"
+  val_split: "val"
+  split_filename: "default_split.yaml"
+  label_schema_file: "configs/labels/proposed_schema_mask.yaml"
+  #mean: [0.122977, 0.080740, 0.002660]
+  #std:  [0.200318, 0.146053, 0.022780]
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]
+
+image:
+  center_crop_size: 3072
+  image_size: 1024
+
+classifier:
+  type: "convnext_large"
+  pretrained: true
+  device: "cuda"
+  gpu_ids: [3,2,1,0]
+
+distributed:
+  enabled: true
+  backend: "nccl"
+  master_addr: "127.0.0.3"
+  master_port: 29503
+  eval_on_rank0_only: true
+  timeout_seconds: 7200
+
+train:
+  epochs: 10
+  batch_size: 8
+  num_workers: 32
+  lr: 0.00003
+  weight_decay: 0.1
+  amp: true
+  grad_accum_steps: 1
+  save_best_metric: "macro_auprc"
+  progress_bar: true
+  tqdm_mininterval: 0.5
+  tqdm_update_interval: 10
+
+loss:
+  name: "asl"
+  gamma_pos: 0.0
+  gamma_neg: 4.0
+  clip: 0.05
+
+augment:
+  type: "randaug"
+  hflip_p: 0.5
+  randaug:
+    num_ops: 2
+    magnitude: 8
+
+output:
+  root_dir: "outputs/checkpoints/teacher"
+
+wandb:
+  enabled: true
+  project: "uwf teacher classifier"
+  entity: null              # 例: "your-entity"（チーム/ユーザ名）
+  name: "teacher_convnextl_proposed_mask"
+  group: "proposed_schema_mask"
+  tags: ["convnextl", "1024", "randaug"]
+  notes: ""
+
+  mode: "online"            # "online" | "offline" | "disabled"
+  log_interval_steps: 50    # trainのstepログ頻度（rank0のみ）
+  log_model: "best"         # "none" | "best" | "last" | "all"
+  artifact_name: "teacher"  # wandb artifact名のprefix

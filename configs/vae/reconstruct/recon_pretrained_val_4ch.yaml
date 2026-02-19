@@ -4,12 +4,58 @@ data:
   root: "../data/uwf/multilabel/MedicalCheckup/splitted"
   split: "val"
   classes:
-    - H1
-    - H2
-    - H3
-    - H4
-    - DME
-    - nAMD
+    - \u7570\u5e38\u306a\u3057
+    - \u767d\u5185\u969c  
+    - \u7db2\u8108\u7d61\u819c\u840e\u7e2e 
+    - RD\u8853\u5f8c  
+    - \u7dd1\u5185\u969c(gla) 
+    - PDR
+    - \u30c9\u30eb\u30fc\u30bc\u30f3(drusen)  
+    - \u8996\u795e\u7d4c\u4e73\u982d\u9665\u51f9\u62e1\u5927
+    - \u7db2\u819c\u88c2\u5b54PC\u5f8c 
+    - \u7cd6\u5c3f\u75c5\u7db2\u819c\u75c7 
+    - mild_NPDR
+    - RRD
+    - \u7db2\u819c\u9759\u8108\u5206\u679d\u9589\u585e 
+    - \u7db2\u8108\u7d61\u819c\u5909\u6027                   
+    - \u5f37\u5ea6\u8fd1\u8996\u773c\u5e95 
+    - \u7db2\u819c\u8272\u7d20\u5909\u6027 
+    - ERM      
+    - \u30b3\u30fc\u30cc\u30b9 
+    - \u785d\u5b50\u4f53\u6df7\u6fc1 
+    - \u773c\u5e95\u51fa\u8840  
+    - S1   
+    - moderate_NPDR 
+    - VH       
+    - \u9ec4\u6591\u5909\u6027 
+    - H1  
+    - \u661f\u72b6\u785d\u5b50\u4f53\u75c7 
+    - \u7db2\u819c\u88c2\u5b54 
+    - \u30b5\u30eb\u30b3\u30a4\u30c9\u30fc\u30b7\u30b9
+    - \u7db2\u819c\u4e2d\u5fc3\u9759\u8108\u9589\u585e
+    - severe_NPDR  
+    - lattice   
+    - \u773c\u5e95\u5224\u5b9a\u56f0\u96e3 
+    - \u7db2\u819c\u5909\u6027 
+    - uveitis   
+    - H2  
+    - S2 
+    - CSC  
+    - PRP 
+    - ERM\u8853\u5f8c 
+    - PCV  
+    - H3  
+    - BRVO_PC\u5f8c 
+    - MH     
+    - lattice(PC\u5f8c)  
+    - nAMD  
+    - DME 
+    - \u30ec\u30fc\u30b6\u30fc\u5f8c 
+    - \u786c\u6027\u767d\u6591 
+    - \u773c\u5185\u60aa\u6027\u30ea\u30f3\u30d1\u816b 
+    - \u6709\u9ac4\u795e\u7d4c\u7dda\u7dad 
+    - \u773c\u5e95\u4ee5\u5916 
+    - S3     
 
 sampling:
   num_samples: 32
