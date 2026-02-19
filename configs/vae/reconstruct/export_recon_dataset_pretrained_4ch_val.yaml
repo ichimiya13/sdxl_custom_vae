@@ -1,0 +1,38 @@
+# Export a reconstructed VAL split as a dataset (images + labels + split YAML)
+# Use the same experiment_name as the train config so split YAML merges.
+
+experiment_name: "recon_dataset_pretrained_4ch"
+
+data:
+  root: "../data/your_dataset_root"
+  split: "val"
+  split_filename: "default_split.yaml"
+  label_schema_file: "configs/labels/proposed_schema_mask.yaml"
+
+image:
+  center_crop_size: 3072
+  image_size: 1024
+
+inference:
+  batch_size: 4
+  num_workers: 4
+
+vae:
+  repo_id: "stabilityai/sdxl-vae"
+  dtype: "fp16"
+  device: "cuda"
+  gpu_ids: [0]
+  posterior: "mode"
+
+sampling:
+  num_samples: null
+  mode: "first"
+  seed: 42
+
+output:
+  root_dir: "outputs/recon_datasets"
+  export_dataset: true
+  split_filename: "default_split.yaml"
+  side_by_side: false
+  keep_original_name_for_t0: true
+  timestep_suffix_format: "__t{t:04d}"

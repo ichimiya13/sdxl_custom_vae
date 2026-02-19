@@ -1,0 +1,48 @@
+# Export a reconstructed TRAIN split as a dataset (images + labels + split YAML)
+# Run this AND the corresponding *_val.yaml with the same experiment_name to get
+# a single dataset root containing both splits.
+
+experiment_name: "recon_dataset_pretrained_4ch"
+
+data:
+  root: "../data/your_dataset_root"
+  split: "train"
+  split_filename: "default_split.yaml"
+  label_schema_file: "configs/labels/proposed_schema_mask.yaml"
+
+image:
+  center_crop_size: 3072
+  image_size: 1024
+
+inference:
+  batch_size: 4
+  num_workers: 4
+
+vae:
+  repo_id: "stabilityai/sdxl-vae"
+  dtype: "fp16"
+  device: "cuda"
+  gpu_ids: [0]
+  posterior: "mode"
+
+# Optional: also export noisy reconstructions (t-curve images)
+# noise:
+#   scheduler: "ddpm"
+#   seed: 123
+#   timesteps: [0, 300, 900]
+#   scheduler_kwargs:
+#     num_train_timesteps: 1000
+#     beta_schedule: "scaled_linear"
+
+sampling:
+  num_samples: null
+  mode: "first"
+  seed: 42
+
+output:
+  root_dir: "outputs/recon_datasets"
+  export_dataset: true
+  split_filename: "default_split.yaml"
+  side_by_side: false
+  keep_original_name_for_t0: true
+  timestep_suffix_format: "__t{t:04d}"

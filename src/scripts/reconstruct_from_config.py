@@ -14,7 +14,9 @@ from torchvision import transforms as T
 from torchvision.utils import save_image
 
 from src.sdxl_custom_vae.datasets.image_dataset import MultiLabelMedicalDataset
+from src.sdxl_custom_vae.labels.schema import load_label_schema
 from src.sdxl_custom_vae.sdxl.load_sdxl_vae import SDXLVAEConfig, load_sdxl_vae
+from src.sdxl_custom_vae.sdxl.noise import build_noise_scheduler
 
 
 class VAEReconstructionWrapper(nn.Module):
@@ -22,15 +24,21 @@ class VAEReconstructionWrapper(nn.Module):
     再構成専用のラッパーモデル。
     forward(x) で encode -> sample -> decode までやって recon を返す。
     """
-    def __init__(self, vae: nn.Module, scaling_factor: float):
+    def __init__(self, vae: nn.Module, scaling_factor: float, posterior: str = "sample"):
         super().__init__()
         self.vae = vae
         self.scaling_factor = scaling_factor
+        self.posterior = str(posterior).lower()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: [-1, 1] スケールの画像
         posterior = self.vae.encode(x)
-        latents = posterior.latent_dist.sample() * self.scaling_factor
+        dist = posterior.latent_dist
+        if self.posterior in ("mode", "mean", "deterministic") and hasattr(dist, "mode"):
+            latents = dist.mode()
+        else:
+            latents = dist.sample()
+        latents = latents * self.scaling_factor
         recon = self.vae.decode(latents / self.scaling_factor).sample  # [-1, 1]
         return recon
 
@@ -82,9 +90,21 @@ def reconstruct_from_config(cfg: Dict[str, Any], config_path: str | Path):
     exp_name = cfg["experiment_name"]
 
     # ===== Data & Dataset =====
-    data_root = cfg["data"]["root"]
-    split = cfg["data"]["split"]
-    classes = cfg["data"]["classes"]
+    data_cfg = cfg["data"]
+    data_root = data_cfg["root"]
+    split = data_cfg["split"]
+
+    # label schema is preferred; fallback to explicit classes for backward compatibility
+    schema_path = data_cfg.get("label_schema_file", None)
+    if schema_path:
+        classes, label_groups, group_reduce, mask_cfg = load_label_schema(schema_path)
+    else:
+        classes = data_cfg.get("classes", None)
+        if not classes:
+            raise KeyError("data.classes or data.label_schema_file is required")
+        label_groups = data_cfg.get("label_groups", {}) or {}
+        group_reduce = data_cfg.get("group_reduce", "any")
+        mask_cfg = data_cfg.get("mask", {}) or {}
 
     center_crop_size = cfg["image"]["center_crop_size"]
     image_size = cfg["image"]["image_size"]
@@ -98,6 +118,10 @@ def reconstruct_from_config(cfg: Dict[str, Any], config_path: str | Path):
         transform=transform,
         center_crop_size=center_crop_size,
         image_size=image_size,
+        split_filename=str(data_cfg.get("split_filename", "default_split.yaml")),
+        label_groups=label_groups,
+        group_reduce=group_reduce,
+        mask=mask_cfg,
     )
 
     indices = select_indices(len(dataset), cfg.get("sampling", {}))
@@ -147,19 +171,49 @@ def reconstruct_from_config(cfg: Dict[str, Any], config_path: str | Path):
     )
 
     # scaling_factor を取得
-    scaling_factor = getattr(vae_core.config, "scaling_factor", 0.13025)
+    scaling_factor = float(getattr(vae_core.config, "scaling_factor", 0.13025))
 
-    # 再構成用ラッパーを作成
-    model = VAEReconstructionWrapper(vae_core, scaling_factor)
-    model.to(main_device)
-    model.eval()
+    # posterior mode / sample
+    posterior_mode = str(vae_cfg.get("posterior", "sample")).lower()
 
     # ===== Output dir =====
     output_cfg = cfg["output"]
     out_root = Path(output_cfg["root_dir"])
     out_dir = out_root / exp_name
     out_dir.mkdir(parents=True, exist_ok=True)
-    save_side_by_side = output_cfg.get("side_by_side", False)
+    save_side_by_side = bool(output_cfg.get("side_by_side", False))
+
+    # dataset export options
+    export_dataset = bool(output_cfg.get("export_dataset", False))
+    preserve_relative_paths = bool(output_cfg.get("preserve_relative_paths", export_dataset))
+    copy_labels = bool(output_cfg.get("copy_labels", export_dataset))
+    write_split_yaml = bool(output_cfg.get("write_split_yaml", export_dataset))
+    split_filename = str(output_cfg.get("split_filename", "default_split.yaml"))
+    keep_original_name_for_t0 = bool(output_cfg.get("keep_original_name_for_t0", True))
+    suffix_fmt = str(output_cfg.get("timestep_suffix_format", "__t{t:04d}"))
+
+    # noise / t-curve saving (optional)
+    noise_cfg = cfg.get("noise", {}) or {}
+    timesteps = [int(t) for t in (noise_cfg.get("timesteps", []) or [])]
+    if not timesteps:
+        timesteps = [0]
+    if 0 not in timesteps:
+        timesteps = [0] + timesteps
+    timesteps = sorted(list(dict.fromkeys(timesteps)))
+
+    scheduler = build_noise_scheduler(noise_cfg)
+    noise_seed = int(noise_cfg.get("seed", 123))
+    noise_gen = None
+    if len(timesteps) > 1:
+        if main_device.type == "cuda":
+            torch.cuda.manual_seed_all(noise_seed)
+            noise_gen = None
+        else:
+            noise_gen = torch.Generator()
+            noise_gen.manual_seed(noise_seed)
+
+    # record saved relpaths for split yaml
+    saved_relpaths: list[str] = []
 
     # 実行時の config もコピーしておく
     config_path = Path(config_path)
@@ -176,29 +230,103 @@ def reconstruct_from_config(cfg: Dict[str, Any], config_path: str | Path):
     for batch_idx, (images, _, paths) in enumerate(dataloader):
         images = images.to(main_device, dtype=torch_dtype)  # [-1, 1]
 
-        recon = model(images)  # [-1, 1]
-        recon = (recon.clamp(-1.0, 1.0) + 1.0) / 2.0  # [0, 1]
+        # encode once
+        dist = vae_core.encode(images).latent_dist
+        if posterior_mode in ("mode", "mean", "deterministic") and hasattr(dist, "mode"):
+            latents = dist.mode()
+        else:
+            latents = dist.sample()
 
-        originals = None
-        if save_side_by_side:
-            originals = (images.clamp(-1.0, 1.0) + 1.0) / 2.0  # [0, 1]
+        z0 = latents * scaling_factor  # scaled latent
 
-        for idx, path in enumerate(paths):
-            recon_tensor = recon[idx]
-            if save_side_by_side and originals is not None:
-                orig_tensor = originals[idx]
-                tensor_to_save = torch.cat([orig_tensor, recon_tensor], dim=2)
+        # noise for this batch (shared across timesteps, so curve is smooth)
+        eps = None
+        if len(timesteps) > 1:
+            if noise_gen is None:
+                eps = torch.randn(z0.shape, device=main_device, dtype=torch_dtype)
             else:
-                tensor_to_save = recon_tensor
-            tensor_to_save = tensor_to_save.to(torch.float32)
-            img_name = Path(path).name
-            save_path = out_dir / img_name
-            save_image(tensor_to_save.cpu(), save_path)
+                eps = torch.randn(z0.shape, generator=noise_gen, device=main_device, dtype=torch_dtype)
+
+        originals_01 = None
+        if save_side_by_side:
+            originals_01 = (images.clamp(-1.0, 1.0) + 1.0) / 2.0  # [0, 1]
+
+        for t in timesteps:
+            if int(t) == 0:
+                zt = z0
+            else:
+                assert eps is not None
+                t_tensor = torch.full((z0.shape[0],), int(t), device=main_device, dtype=torch.long)
+                zt = scheduler.add_noise(z0, eps, t_tensor)
+
+            recon_t = vae_core.decode(zt / scaling_factor).sample  # [-1,1]
+            recon_01 = (recon_t.clamp(-1.0, 1.0) + 1.0) / 2.0  # [0,1]
+
+            for idx, path in enumerate(paths):
+                recon_tensor = recon_01[idx]
+                if save_side_by_side and originals_01 is not None and int(t) == 0:
+                    orig_tensor = originals_01[idx]
+                    tensor_to_save = torch.cat([orig_tensor, recon_tensor], dim=2)
+                else:
+                    tensor_to_save = recon_tensor
+                tensor_to_save = tensor_to_save.to(torch.float32)
+
+                p = Path(path)
+                # relative path for dataset export
+                if preserve_relative_paths:
+                    try:
+                        rel = p.relative_to(Path(data_root))
+                    except Exception:
+                        rel = Path(p.name)
+                else:
+                    rel = Path(p.name)
+
+                if int(t) == 0 and keep_original_name_for_t0:
+                    rel_out = rel
+                else:
+                    suf = suffix_fmt.format(t=int(t))
+                    rel_out = rel.with_name(rel.stem + suf + rel.suffix)
+
+                save_path = out_dir / rel_out
+                save_path.parent.mkdir(parents=True, exist_ok=True)
+                save_image(tensor_to_save.cpu(), save_path)
+
+                saved_relpaths.append(rel_out.as_posix())
+
+                if copy_labels:
+                    label_src = p.with_suffix(".yaml")
+                    label_dst = save_path.with_suffix(".yaml")
+                    label_dst.parent.mkdir(parents=True, exist_ok=True)
+                    if label_src.is_file():
+                        try:
+                            label_dst.write_text(label_src.read_text(encoding="utf-8"), encoding="utf-8")
+                        except Exception:
+                            # fallback: binary copy
+                            import shutil
+
+                            shutil.copy2(label_src, label_dst)
 
         print(
-            f"[{exp_name}] batch {batch_idx + 1}/{len(dataloader)} "
-            f"saved {len(paths)} images"
+            f"[{exp_name}] batch {batch_idx + 1}/{len(dataloader)} saved {len(paths)} images"
         )
+
+    # write split yaml if requested
+    if write_split_yaml:
+        split_key = str(split)
+        split_path = out_dir / split_filename
+        existing = {}
+        if split_path.is_file():
+            try:
+                with split_path.open("r", encoding="utf-8") as f:
+                    existing = yaml.safe_load(f) or {}
+            except Exception:
+                existing = {}
+        if not isinstance(existing, dict):
+            existing = {}
+
+        # replace the current split entry
+        existing[split_key] = saved_relpaths
+        split_path.write_text(yaml.safe_dump(existing, allow_unicode=True), encoding="utf-8")
 
     print(f"Done. Saved reconstructions to: {out_dir}")
 

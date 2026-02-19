@@ -1,0 +1,62 @@
+# Diagnose SDXL VAE bottleneck (pretrained 4ch) with t-curve
+
+experiment_name: "diag_pretrained_val_4ch_tcurve"
+seed: 42
+
+data:
+  root: "../data/your_dataset_root"
+  split: "val"
+  split_filename: "default_split.yaml"
+  label_schema_file: "configs/labels/proposed_schema_mask.yaml"
+  # teacher normalization (ImageNet)
+  mean: [0.485, 0.456, 0.406]
+  std:  [0.229, 0.224, 0.225]
+
+image:
+  center_crop_size: 3072
+  image_size: 1024
+
+teacher:
+  checkpoint: "outputs/checkpoints/teacher/best.pt"
+  imagenet_pretrained: true
+  gpu_ids: [0]
+
+vae:
+  repo_id: "stabilityai/sdxl-vae"
+  dtype: "fp32"   # fp16 also ok
+  device: "cuda"
+  posterior: "mode"  # "mode" (deterministic) or "sample"
+  gpu_ids: [0]
+
+noise:
+  scheduler: "ddpm"     # "ddpm" (diffusers) or "custom"
+  seed: 123
+  timesteps: [0, 50, 100, 200, 300, 400, 600, 800, 900]
+  scheduler_kwargs:
+    num_train_timesteps: 1000
+    beta_schedule: "scaled_linear"
+
+threshold:
+  mode: "search_on_real_val"   # or "fixed"
+  grid:
+    start: 0.01
+    end: 0.99
+    num: 199
+
+sampling:
+  num_samples: null   # e.g. 512 for quick smoke test
+  mode: "first"      # "first" | "random"
+  seed: 42
+
+inference:
+  batch_size: 4
+  num_workers: 4
+
+agreement:
+  embedding_cosine: false
+
+output:
+  root_dir: "outputs/diagnostics/vae_bottleneck"
+  save_topk: 64
+  visualize_timesteps: [300, 900]
+  save_diff: true

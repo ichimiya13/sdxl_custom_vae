@@ -1,0 +1,46 @@
+# Train SDXL-style VAE with latent_channels=8 (random init)
+
+experiment_name: "vae_base_scratch_8ch"
+seed: 42
+
+data:
+  root: "../data/your_dataset_root"
+  split_filename: "default_split.yaml"
+  train_split: "train"
+  val_split: "val"
+  label_schema_file: "configs/labels/proposed_schema_mask.yaml"
+
+image:
+  center_crop_size: 3072
+  image_size: 1024
+
+augment:
+  hflip_p: 0.5
+
+vae:
+  base_repo_id: "stabilityai/sdxl-vae"
+  latent_channels: 8
+  init_from_pretrained: false
+  dtype: "fp16"
+  device: "cuda"
+  gpu_ids: [0]
+
+train:
+  epochs: 10
+  batch_size: 2
+  num_workers: 4
+  grad_accum_steps: 1
+  log_every: 50
+  amp: true
+
+optimizer:
+  lr: 1.0e-4
+  weight_decay: 1.0e-2
+
+loss:
+  recon_type: "l1"
+  recon_weight: 1.0
+  kl_weight: 1.0e-6
+
+output:
+  root_dir: "outputs/checkpoints/vae"

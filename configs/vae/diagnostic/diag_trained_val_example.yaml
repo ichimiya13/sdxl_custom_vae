@@ -1,0 +1,48 @@
+# Example: diagnose a locally trained VAE (repo_id points to a local directory saved by train_vae_from_config)
+
+experiment_name: "diag_trained_val_example"
+seed: 42
+
+data:
+  root: "../data/your_dataset_root"
+  split: "val"
+  split_filename: "default_split.yaml"
+  label_schema_file: "configs/labels/proposed_schema_mask.yaml"
+  mean: [0.485, 0.456, 0.406]
+  std:  [0.229, 0.224, 0.225]
+
+image:
+  center_crop_size: 3072
+  image_size: 1024
+
+teacher:
+  checkpoint: "outputs/checkpoints/teacher/best.pt"
+  imagenet_pretrained: true
+  gpu_ids: [0]
+
+vae:
+  # point to a local directory containing config.json + model weights
+  # e.g. outputs/checkpoints/vae/vae_base_ft_4ch/best
+  repo_id: "outputs/checkpoints/vae/vae_base_ft_4ch/best"
+  dtype: "fp32"
+  device: "cuda"
+  posterior: "mode"
+  gpu_ids: [0]
+
+noise:
+  scheduler: "ddpm"
+  seed: 123
+  timesteps: [0, 50, 100, 200, 300, 400, 600, 800, 900]
+  scheduler_kwargs:
+    num_train_timesteps: 1000
+    beta_schedule: "scaled_linear"
+
+inference:
+  batch_size: 4
+  num_workers: 4
+
+output:
+  root_dir: "outputs/diagnostics/vae_bottleneck"
+  save_topk: 64
+  visualize_timesteps: [300, 900]
+  save_diff: true
