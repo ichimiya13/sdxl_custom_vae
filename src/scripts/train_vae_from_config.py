@@ -124,12 +124,14 @@ def train_from_config(cfg: dict[str, Any], config_path: str | Path) -> None:
     else:
         device = torch.device("cpu")
 
+    # Keep master weights in fp32; use cfg dtype only for autocast compute
+    param_dtype = torch.float32
     if dtype_str == "fp16":
-        torch_dtype = torch.float16
+        amp_dtype = torch.float16
     elif dtype_str == "bf16":
-        torch_dtype = torch.bfloat16
+        amp_dtype = torch.bfloat16
     else:
-        torch_dtype = torch.float32
+        amp_dtype = None  # fp32 compute
 
     # -------------------------
     # seed
@@ -198,7 +200,7 @@ def train_from_config(cfg: dict[str, Any], config_path: str | Path) -> None:
     max_epochs = int(train_cfg.get("epochs", 10))
     grad_accum = int(train_cfg.get("grad_accum_steps", 1))
     log_every = int(train_cfg.get("log_every", 50))
-    amp = bool(train_cfg.get("amp", device.type == "cuda" and torch_dtype in (torch.float16, torch.bfloat16)))
+    amp = bool(train_cfg.get("amp", device.type == "cuda" and amp_dtype is not None))
 
     train_loader = DataLoader(
         train_ds,
@@ -221,12 +223,19 @@ def train_from_config(cfg: dict[str, Any], config_path: str | Path) -> None:
         if not torch.cuda.is_available() or device.type != "cuda":
             from contextlib import nullcontext
             return nullcontext()
+        if (not enabled) or (amp_dtype is None):
+            from contextlib import nullcontext
+            return nullcontext()
         if hasattr(torch, "amp") and hasattr(torch.amp, "autocast"):
-            return torch.amp.autocast(device_type="cuda", enabled=enabled, dtype=torch_dtype)
-        return torch.cuda.amp.autocast(enabled=enabled)
+            return torch.amp.autocast(device_type="cuda", enabled=True, dtype=amp_dtype)
+        # fallback for older torch
+        try:
+            return torch.cuda.amp.autocast(enabled=True, dtype=amp_dtype)
+        except TypeError:
+            return torch.cuda.amp.autocast(enabled=True)
 
     scaler = None
-    if amp and device.type == "cuda" and torch_dtype == torch.float16:
+    if amp and device.type == "cuda" and amp_dtype == torch.float16:
         scaler = torch.cuda.amp.GradScaler()
 
     # -------------------------
@@ -237,7 +246,7 @@ def train_from_config(cfg: dict[str, Any], config_path: str | Path) -> None:
         from diffusers import AutoencoderKL  # type: ignore
 
         print(f"[resume] loading VAE from: {resume_dir}")
-        vae = AutoencoderKL.from_pretrained(resume_dir, torch_dtype=torch_dtype)
+        vae = AutoencoderKL.from_pretrained(resume_dir, torch_dtype=param_dtype)
         vae.to(device)
         start_epoch = 0
         global_step = 0
@@ -257,7 +266,7 @@ def train_from_config(cfg: dict[str, Any], config_path: str | Path) -> None:
         vae = build_autoencoder_kl(
             base_repo_id=base_repo_id,
             latent_channels=latent_channels,
-            torch_dtype=torch_dtype,
+            torch_dtype=param_dtype,
             device=("cuda" if device.type == "cuda" else "cpu"),
             init_from_pretrained_if_possible=init_from_pretrained,
         )
@@ -351,7 +360,7 @@ def train_from_config(cfg: dict[str, Any], config_path: str | Path) -> None:
         n = 0
         with torch.no_grad():
             for x, _, _ in val_loader:
-                x = x.to(device, dtype=torch_dtype)
+                x = x.to(device, dtype=param_dtype)
                 posterior = vae.encode(x).latent_dist
                 latents = posterior.mode() if hasattr(posterior, "mode") else posterior.sample()
                 recon = vae.decode(latents).sample
@@ -378,7 +387,7 @@ def train_from_config(cfg: dict[str, Any], config_path: str | Path) -> None:
         optimizer.zero_grad(set_to_none=True)
 
         for it, (x, _, _) in enumerate(train_loader):
-            x = x.to(device, dtype=torch_dtype)
+            x = x.to(device, dtype=param_dtype)
 
             with autocast_ctx(amp):
                 posterior = vae.encode(x).latent_dist
