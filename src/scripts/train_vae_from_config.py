@@ -327,6 +327,18 @@ def train_from_config(cfg: dict[str, Any], config_path: str | Path) -> None:
         best_val = None
         state = None
 
+    # --- init report (for latent_channels != base latent) ---
+    init_report = getattr(vae, "_sdxl_custom_vae_init", None)
+    if isinstance(init_report, dict):
+        try:
+            import json
+
+            (out_dir / "init_report.json").write_text(
+                json.dumps(init_report, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception:
+            pass
+
     # -------------------------
     # optimizer
     # -------------------------
@@ -404,6 +416,66 @@ def train_from_config(cfg: dict[str, Any], config_path: str | Path) -> None:
     last_dir = out_dir / "last"
     best_dir.mkdir(parents=True, exist_ok=True)
     last_dir.mkdir(parents=True, exist_ok=True)
+
+    # -------------------------
+    # 2-stage training (for channel expansion)
+    # -------------------------
+    def _set_trainable_params(trainable_names: Optional[set[str]]):
+        """Set requires_grad based on parameter name set.
+
+        If trainable_names is None, all params are trainable.
+        """
+
+        if trainable_names is None:
+            for p in vae.parameters():
+                p.requires_grad_(True)
+        else:
+            for n, p in vae.named_parameters():
+                p.requires_grad_(n in trainable_names)
+
+    def _count_trainable() -> int:
+        return int(sum(p.numel() for p in vae.parameters() if p.requires_grad))
+
+    stage1_enabled = bool(train_cfg.get("stage1_enabled", True))
+    stage1_steps = int(train_cfg.get("stage1_steps", 200))
+
+    random_param_names: set[str] = set()
+    if isinstance(init_report, dict):
+        rn = init_report.get("random_init_param_names", [])
+        if isinstance(rn, list):
+            random_param_names = set(str(x) for x in rn)
+
+    # Only do stage-1 when we are *not* resuming and we actually have
+    # randomly-initialized params (e.g. latent_channels expansion).
+    train_stage = 2
+    stage1_until_step = 0
+    if (resume_dir is None) and stage1_enabled and (stage1_steps > 0) and (len(random_param_names) > 0):
+        train_stage = 1
+        stage1_until_step = stage1_steps
+        _set_trainable_params(random_param_names)
+        preview_names = ", ".join(sorted(list(random_param_names))[:12])
+        msg = (
+            f"[stage1] training only randomly-initialized params for {stage1_until_step} optimizer steps "
+            f"(trainable params={_count_trainable():,})\n"
+            f"         trainable param examples: {preview_names}"
+        )
+        if tqdm is not None and use_pbar:
+            tqdm.write(msg)
+        else:
+            print(msg, flush=True)
+
+        if use_wandb and wandb_run is not None:
+            try:
+                wandb_run.summary["stage1_steps"] = int(stage1_until_step)
+                wandb_run.summary["stage1_trainable_params"] = int(_count_trainable())
+                wandb_run.summary["random_init_param_count"] = int(len(random_param_names))
+            except Exception:
+                pass
+            wandb_run.log({"train/stage": 1}, step=global_step)
+    else:
+        _set_trainable_params(None)
+        if use_wandb and wandb_run is not None:
+            wandb_run.log({"train/stage": 2}, step=global_step)
 
     def eval_val(epoch_idx: int) -> dict[str, float]:
         vae.eval()
@@ -524,6 +596,7 @@ def train_from_config(cfg: dict[str, Any], config_path: str | Path) -> None:
                             "kl": f"{running_kl / max(count, 1):.0f}",
                             "lr": f"{lr_now:.2e}",
                             "gs": global_step,
+                            "stage": train_stage,
                         }
                     )
 
@@ -537,6 +610,18 @@ def train_from_config(cfg: dict[str, Any], config_path: str | Path) -> None:
                     optimizer.zero_grad(set_to_none=True)
                     global_step += 1
 
+                    # stage transition
+                    if train_stage == 1 and global_step >= stage1_until_step:
+                        _set_trainable_params(None)
+                        train_stage = 2
+                        msg2 = f"[stage2] unfreezed all params at global_step={global_step}"
+                        if tqdm is not None and use_pbar:
+                            tqdm.write(msg2)
+                        else:
+                            print(msg2, flush=True)
+                        if use_wandb and wandb_run is not None:
+                            wandb_run.log({"train/stage": 2, "train/stage_transition_step": global_step}, step=global_step)
+
                     # step metrics -> wandb (preferred), otherwise fallback to stdout
                     if use_wandb and wandb_run is not None and wandb_log_interval > 0 and (global_step % wandb_log_interval == 0):
                         lr_now = float(optimizer.param_groups[0]["lr"])
@@ -544,6 +629,7 @@ def train_from_config(cfg: dict[str, Any], config_path: str | Path) -> None:
                         payload = {
                             "global_step": global_step,
                             "epoch": epoch + 1,
+                            "train/stage": train_stage,
                             "train/loss_step": float(loss_total.detach().cpu().item()),
                             "train/recon_step": float(recon_loss.detach().cpu().item()),
                             "train/kl_step": float(kl_loss.detach().cpu().item()),
