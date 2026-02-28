@@ -24,6 +24,11 @@ from typing import Any, Dict, Optional
 
 import yaml
 
+try:
+    from tqdm.auto import tqdm  # progress bar
+except Exception:
+    tqdm = None  # fallback
+
 
 def load_yaml(path: str | Path) -> dict[str, Any]:
     with Path(path).open("r", encoding="utf-8") as f:
@@ -91,6 +96,7 @@ def _kl_loss_from_posterior(posterior) -> "torch.Tensor":
 
 
 def train_from_config(cfg: dict[str, Any], config_path: str | Path) -> None:
+    import sys
     import time
     import torch
     import torch.nn.functional as F
@@ -218,6 +224,47 @@ def train_from_config(cfg: dict[str, Any], config_path: str | Path) -> None:
         pin_memory=(device.type == "cuda"),
     )
 
+    # tqdm settings (epoch-level progress)
+    use_pbar = bool(train_cfg.get("progress_bar", True)) and (tqdm is not None)
+    pbar_disable = not use_pbar
+    pbar_mininterval = float(train_cfg.get("tqdm_mininterval", 0.5))
+    pbar_update_interval = int(train_cfg.get("tqdm_update_interval", 10))
+    pbar_leave = bool(train_cfg.get("tqdm_leave", False))
+
+    # --- wandb setup ---
+    wandb_cfg = cfg.get("wandb", {}) or {}
+    use_wandb = bool(wandb_cfg.get("enabled", False))
+
+    wandb_run = None
+    if use_wandb:
+        try:
+            import wandb
+        except Exception as e:
+            print(f"[wandb] disabled because wandb import failed: {e}", flush=True)
+            use_wandb = False
+        else:
+            mode = str(wandb_cfg.get("mode", "online"))
+            if mode.lower() in ("disabled", "off", "false", "0"):
+                use_wandb = False
+            else:
+                init_kwargs = dict(
+                    project=wandb_cfg.get("project", None),
+                    entity=wandb_cfg.get("entity", None),
+                    name=wandb_cfg.get("name", exp_name),
+                    group=wandb_cfg.get("group", None),
+                    tags=wandb_cfg.get("tags", None),
+                    notes=wandb_cfg.get("notes", None),
+                    dir=str(wandb_cfg.get("dir", out_dir)),
+                    config=cfg,
+                    mode=mode,
+                )
+                init_kwargs = {k: v for k, v in init_kwargs.items() if v is not None}
+                wandb_run = wandb.init(**init_kwargs)
+                wandb_run.summary["experiment_name"] = exp_name
+                wandb_run.summary["output_dir"] = str(out_dir)
+
+    wandb_log_interval = int(wandb_cfg.get("log_interval_steps", log_every)) if use_wandb else 0
+
     # autocast helper
     def autocast_ctx(enabled: bool):
         if not torch.cuda.is_available() or device.type != "cuda":
@@ -236,7 +283,11 @@ def train_from_config(cfg: dict[str, Any], config_path: str | Path) -> None:
 
     scaler = None
     if amp and device.type == "cuda" and amp_dtype == torch.float16:
-        scaler = torch.cuda.amp.GradScaler()
+        # Prefer the newer API when available (avoids FutureWarning)
+        if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+            scaler = torch.amp.GradScaler("cuda")
+        else:
+            scaler = torch.cuda.amp.GradScaler()
 
     # -------------------------
     # build / resume VAE
@@ -354,12 +405,25 @@ def train_from_config(cfg: dict[str, Any], config_path: str | Path) -> None:
     best_dir.mkdir(parents=True, exist_ok=True)
     last_dir.mkdir(parents=True, exist_ok=True)
 
-    def eval_val() -> dict[str, float]:
+    def eval_val(epoch_idx: int) -> dict[str, float]:
         vae.eval()
         loss_sum = 0.0
+        recon_sum = 0.0
+        kl_sum = 0.0
         n = 0
         with torch.no_grad():
-            for x, _, _ in val_loader:
+            it_val = val_loader
+            if tqdm is not None and use_pbar:
+                it_val = tqdm(
+                    val_loader,
+                    desc=f"Val   {epoch_idx}/{max_epochs}",
+                    disable=pbar_disable,
+                    dynamic_ncols=True,
+                    leave=False,
+                    mininterval=pbar_mininterval,
+                )
+
+            for step_v, (x, _, _) in enumerate(it_val, start=1):
                 x = x.to(device, dtype=param_dtype)
                 posterior = vae.encode(x).latent_dist
                 latents = posterior.mode() if hasattr(posterior, "mode") else posterior.sample()
@@ -371,117 +435,221 @@ def train_from_config(cfg: dict[str, Any], config_path: str | Path) -> None:
                 kl_loss = _kl_loss_from_posterior(posterior)
                 total = w_recon * recon_loss + w_kl * kl_loss
                 loss_sum += float(total.detach().cpu().item())
+                recon_sum += float(recon_loss.detach().cpu().item())
+                kl_sum += float(kl_loss.detach().cpu().item())
                 n += 1
+
+                if tqdm is not None and use_pbar and (not pbar_disable) and (step_v % pbar_update_interval == 0):
+                    it_val.set_postfix({"loss": f"{loss_sum / max(n, 1):.4f}"})  # type: ignore[attr-defined]
         vae.train()
-        return {"val_loss": loss_sum / max(n, 1)}
+        return {
+            "val_loss": loss_sum / max(n, 1),
+            "val_recon": recon_sum / max(n, 1),
+            "val_kl": kl_sum / max(n, 1),
+        }
 
     start = time.time()
-    for epoch in range(start_epoch, max_epochs):
-        vae.train()
-        running = 0.0
-        running_recon = 0.0
-        running_kl = 0.0
-        running_feat = 0.0
-        count = 0
+    try:
+        for epoch in range(start_epoch, max_epochs):
+            vae.train()
+            running = 0.0
+            running_recon = 0.0
+            running_kl = 0.0
+            running_feat = 0.0
+            count = 0
 
-        optimizer.zero_grad(set_to_none=True)
+            optimizer.zero_grad(set_to_none=True)
 
-        for it, (x, _, _) in enumerate(train_loader):
-            x = x.to(device, dtype=param_dtype)
-
-            with autocast_ctx(amp):
-                posterior = vae.encode(x).latent_dist
-                latents = posterior.sample() if hasattr(posterior, "sample") else posterior.latent_dist.sample()
-                recon = vae.decode(latents).sample
-
-                if recon_type == "mse":
-                    recon_loss = F.mse_loss(recon, x)
-                else:
-                    recon_loss = F.l1_loss(recon, x)
-
-                kl_loss = _kl_loss_from_posterior(posterior)
-
-                feat_loss = None
-                if use_feat and teacher_feat is not None:
-                    x_n = to_teacher_norm(x.to(torch.float32))
-                    r_n = to_teacher_norm(recon.to(torch.float32))
-                    emb_x = forward_teacher_embedding(x_n)
-                    emb_r = forward_teacher_embedding(r_n)
-                    if feat_type in ("cos", "cosine"):
-                        feat_loss = 1.0 - F.cosine_similarity(emb_x, emb_r, dim=1).mean()
-                    else:
-                        feat_loss = F.mse_loss(emb_r, emb_x)
-                else:
-                    feat_loss = recon_loss.new_tensor(0.0)
-
-                loss_total = w_recon * recon_loss + w_kl * kl_loss + w_feat * feat_loss
-                # gradient accumulation
-                loss = loss_total / float(max(1, grad_accum))
-
-            if scaler is not None:
-                scaler.scale(loss).backward()
-            else:
-                loss.backward()
-
-            if (it + 1) % grad_accum == 0:
-                if scaler is not None:
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-                global_step += 1
-
-            # logging
-            running += float(loss_total.detach().cpu().item())
-            running_recon += float(recon_loss.detach().cpu().item())
-            running_kl += float(kl_loss.detach().cpu().item())
-            running_feat += float(feat_loss.detach().cpu().item())
-            count += 1
-
-            if log_every > 0 and (global_step % log_every == 0) and (it + 1) % grad_accum == 0:
-                elapsed = time.time() - start
-                msg = (
-                    f"[epoch {epoch+1}/{max_epochs}] step={global_step} "
-                    f"loss={running/max(count,1):.4f} "
-                    f"recon={running_recon/max(count,1):.4f} "
-                    f"kl={running_kl/max(count,1):.4f} "
-                    f"feat={running_feat/max(count,1):.4f} "
-                    f"elapsed={elapsed/60:.1f}m"
+            it_train = train_loader
+            if tqdm is not None and use_pbar:
+                it_train = tqdm(
+                    train_loader,
+                    desc=f"Train {epoch+1}/{max_epochs}",
+                    disable=pbar_disable,
+                    dynamic_ncols=True,
+                    leave=pbar_leave,
+                    mininterval=pbar_mininterval,
                 )
+
+            for step_in_epoch, (x, _, _) in enumerate(it_train, start=1):
+                x = x.to(device, dtype=param_dtype)
+
+                with autocast_ctx(amp):
+                    posterior = vae.encode(x).latent_dist
+                    latents = posterior.sample() if hasattr(posterior, "sample") else posterior.latent_dist.sample()
+                    recon = vae.decode(latents).sample
+
+                    if recon_type == "mse":
+                        recon_loss = F.mse_loss(recon, x)
+                    else:
+                        recon_loss = F.l1_loss(recon, x)
+
+                    kl_loss = _kl_loss_from_posterior(posterior)
+
+                    if use_feat and teacher_feat is not None:
+                        x_n = to_teacher_norm(x.to(torch.float32))
+                        r_n = to_teacher_norm(recon.to(torch.float32))
+                        emb_x = forward_teacher_embedding(x_n)
+                        emb_r = forward_teacher_embedding(r_n)
+                        if feat_type in ("cos", "cosine"):
+                            feat_loss = 1.0 - F.cosine_similarity(emb_x, emb_r, dim=1).mean()
+                        else:
+                            feat_loss = F.mse_loss(emb_r, emb_x)
+                    else:
+                        feat_loss = recon_loss.new_tensor(0.0)
+
+                    loss_total = w_recon * recon_loss + w_kl * kl_loss + w_feat * feat_loss
+                    # gradient accumulation
+                    loss = loss_total / float(max(1, grad_accum))
+
+                if scaler is not None:
+                    scaler.scale(loss).backward()
+                else:
+                    loss.backward()
+
+                # logging (running averages)
+                running += float(loss_total.detach().cpu().item())
+                running_recon += float(recon_loss.detach().cpu().item())
+                running_kl += float(kl_loss.detach().cpu().item())
+                running_feat += float(feat_loss.detach().cpu().item())
+                count += 1
+
+                # progress bar update
+                if tqdm is not None and use_pbar and (not pbar_disable) and (step_in_epoch % pbar_update_interval == 0):
+                    lr_now = float(optimizer.param_groups[0]["lr"])
+                    it_train.set_postfix(  # type: ignore[attr-defined]
+                        {
+                            "loss": f"{running / max(count, 1):.4f}",
+                            "recon": f"{running_recon / max(count, 1):.4f}",
+                            "kl": f"{running_kl / max(count, 1):.0f}",
+                            "lr": f"{lr_now:.2e}",
+                            "gs": global_step,
+                        }
+                    )
+
+                # optimizer step
+                if step_in_epoch % grad_accum == 0:
+                    if scaler is not None:
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+                    global_step += 1
+
+                    # step metrics -> wandb (preferred), otherwise fallback to stdout
+                    if use_wandb and wandb_run is not None and wandb_log_interval > 0 and (global_step % wandb_log_interval == 0):
+                        lr_now = float(optimizer.param_groups[0]["lr"])
+                        elapsed = time.time() - start
+                        payload = {
+                            "global_step": global_step,
+                            "epoch": epoch + 1,
+                            "train/loss_step": float(loss_total.detach().cpu().item()),
+                            "train/recon_step": float(recon_loss.detach().cpu().item()),
+                            "train/kl_step": float(kl_loss.detach().cpu().item()),
+                            "train/feat_step": float(feat_loss.detach().cpu().item()),
+                            "train/loss_running": float(running / max(count, 1)),
+                            "train/recon_running": float(running_recon / max(count, 1)),
+                            "train/kl_running": float(running_kl / max(count, 1)),
+                            "train/feat_running": float(running_feat / max(count, 1)),
+                            "train/lr": lr_now,
+                            "time/elapsed_min": float(elapsed / 60.0),
+                        }
+                        if scaler is not None:
+                            try:
+                                payload["train/grad_scale"] = float(scaler.get_scale())
+                            except Exception:
+                                pass
+                        wandb_run.log(payload, step=global_step)
+                    elif (not use_wandb) and log_every > 0 and (global_step % log_every == 0):
+                        elapsed = time.time() - start
+                        msg = (
+                            f"[epoch {epoch+1}/{max_epochs}] step={global_step} "
+                            f"loss={running / max(count, 1):.4f} "
+                            f"recon={running_recon / max(count, 1):.4f} "
+                            f"kl={running_kl / max(count, 1):.0f} "
+                            f"feat={running_feat / max(count, 1):.4f} "
+                            f"elapsed={elapsed/60:.1f}m"
+                        )
+                        if tqdm is not None and use_pbar:
+                            tqdm.write(msg)
+                        else:
+                            print(msg, flush=True)
+
+            # epoch end eval
+            val_metrics = eval_val(epoch + 1)
+            val_loss = float(val_metrics["val_loss"])
+            msg = (
+                f"[epoch {epoch+1}] "
+                f"val_loss={val_loss:.6f} "
+                f"val_recon={float(val_metrics['val_recon']):.6f} "
+                f"val_kl={float(val_metrics['val_kl']):.2f}"
+            )
+            if tqdm is not None and use_pbar:
+                tqdm.write(msg)
+            else:
                 print(msg, flush=True)
 
-        # epoch end eval
-        val_metrics = eval_val()
-        val_loss = float(val_metrics["val_loss"])
-        print(f"[epoch {epoch+1}] val_loss={val_loss:.6f}", flush=True)
+            # epoch metrics -> wandb
+            if use_wandb and wandb_run is not None:
+                lr_now = float(optimizer.param_groups[0]["lr"])
+                wandb_run.log(
+                    {
+                        "epoch": epoch + 1,
+                        "train/loss_epoch": float(running / max(count, 1)),
+                        "train/recon_epoch": float(running_recon / max(count, 1)),
+                        "train/kl_epoch": float(running_kl / max(count, 1)),
+                        "train/feat_epoch": float(running_feat / max(count, 1)),
+                        "train/lr": lr_now,
+                        "val/loss": val_loss,
+                        "val/recon": float(val_metrics["val_recon"]),
+                        "val/kl": float(val_metrics["val_kl"]),
+                    },
+                    step=global_step,
+                )
 
-        # save last
-        try:
-            vae.save_pretrained(last_dir)
-        except Exception as e:
-            print(f"[warn] save_pretrained(last) failed: {e}")
-
-        train_state = {
-            "epoch": epoch + 1,
-            "global_step": global_step,
-            "best_val": best_val,
-            "optimizer": optimizer.state_dict(),
-            "scaler": scaler.state_dict() if scaler is not None else None,
-            "val_metrics": val_metrics,
-        }
-        torch.save(train_state, last_dir / "train_state.pt")
-
-        # save best
-        improved = best_val is None or val_loss < float(best_val)
-        if improved:
-            best_val = val_loss
+            # save last
             try:
-                vae.save_pretrained(best_dir)
+                vae.save_pretrained(last_dir)
             except Exception as e:
-                print(f"[warn] save_pretrained(best) failed: {e}")
-            torch.save({**train_state, "best_val": best_val}, best_dir / "train_state.pt")
-            print(f"[best] updated best_val={best_val:.6f}", flush=True)
+                print(f"[warn] save_pretrained(last) failed: {e}")
+
+            train_state = {
+                "epoch": epoch + 1,
+                "global_step": global_step,
+                "best_val": best_val,
+                "optimizer": optimizer.state_dict(),
+                "scaler": scaler.state_dict() if scaler is not None else None,
+                "val_metrics": val_metrics,
+            }
+            torch.save(train_state, last_dir / "train_state.pt")
+
+            # save best
+            improved = best_val is None or val_loss < float(best_val)
+            if improved:
+                best_val = val_loss
+                try:
+                    vae.save_pretrained(best_dir)
+                except Exception as e:
+                    print(f"[warn] save_pretrained(best) failed: {e}")
+                torch.save({**train_state, "best_val": best_val}, best_dir / "train_state.pt")
+                msg_best = f"[best] updated best_val={best_val:.6f}"
+                if tqdm is not None and use_pbar:
+                    tqdm.write(msg_best)
+                else:
+                    print(msg_best, flush=True)
+
+                if use_wandb and wandb_run is not None:
+                    try:
+                        wandb_run.summary["best_val_loss"] = float(best_val)
+                    except Exception:
+                        pass
+    finally:
+        if use_wandb and wandb_run is not None:
+            try:
+                wandb_run.finish()
+            except Exception:
+                pass
 
     print(f"Done. Saved to: {out_dir}", flush=True)
 

@@ -36,6 +36,10 @@ train:
   grad_accum_steps: 1
   log_every: 50
   amp: true
+  progress_bar: true
+  tqdm_update_interval: 10
+  tqdm_mininterval: 0.5
+  tqdm_leave: false
 
 optimizer:
   lr: 1.0e-4
@@ -55,3 +59,10 @@ loss:
 
 output:
   root_dir: "outputs/checkpoints/vae"
+
+wandb:
+  enabled: true
+  project: "uwf-vae"
+  name: "vae_ft_4ch_bf16"
+  mode: "online"          # "offline" も可
+  log_interval_steps: 50
