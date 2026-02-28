@@ -4,7 +4,7 @@ experiment_name: "vae_base_ft_4ch"
 seed: 42
 
 data:
-  root: "../data/your_dataset_root"
+  root: "../data/uwf/multilabel/MedicalCheckup/splitted"
   split_filename: "default_split.yaml"
   train_split: "train"
   val_split: "val"
@@ -25,9 +25,9 @@ vae:
   base_repo_id: "stabilityai/sdxl-vae"
   latent_channels: 4
   init_from_pretrained: true
-  dtype: "fp16"   # fp32 for stability if needed
+  dtype: "bf16"   # fp32 for stability if needed
   device: "cuda"
-  gpu_ids: [0]
+  gpu_ids: [3]
 
 train:
   epochs: 10
