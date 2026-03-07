@@ -1,0 +1,80 @@
+# Fine-tune SDXL VAE (16ch) on your dataset
+# - Transplant all matching-shape params from official SDXL VAE
+# - Random-init only mismatched layers (e.g., encoder.conv_out / quant_conv / post_quant_conv / decoder.conv_in)
+# - Stage1: train only random-initialized params briefly, then train all
+
+experiment_name: "vae_base_ft_16ch"
+seed: 42
+
+data:
+  root: "../data/uwf/multilabel/MedicalCheckup/splitted"
+  split_filename: "default_split.yaml"
+  train_split: "train"
+  val_split: "val"
+  label_schema_file: "configs/labels/proposed_schema_mask.yaml"
+  mean: [0.485, 0.456, 0.406]
+  std:  [0.229, 0.224, 0.225]
+
+image:
+  center_crop_size: 3072
+  image_size: 1024
+
+augment:
+  hflip_p: 0.5
+
+vae:
+  base_repo_id: "stabilityai/sdxl-vae"
+  latent_channels: 16
+  init_from_pretrained: true
+  dtype: "bf16"
+  device: "cuda"
+  gpu_ids: [5]                 # <-- change as you like
+
+train:
+  epochs: 10
+  batch_size: 2                # if OOM, try 1 (A100 80GB should often be OK)
+  num_workers: 4
+  grad_accum_steps: 1
+
+  # logging / UI
+  log_every: 50
+  amp: true
+  progress_bar: true
+  tqdm_update_interval: 10
+  tqdm_mininterval: 0.5
+  tqdm_leave: false
+
+  # two-stage training
+  stage1_enabled: true
+  stage1_steps: 200
+
+optimizer:
+  lr: 1.0e-4
+  weight_decay: 1.0e-2
+  betas: [0.9, 0.999]
+
+loss:
+  recon_type: "l1"
+  recon_weight: 1.0
+
+  # See note in 8ch config. Scaling by (4 / C) keeps KL contribution roughly comparable to 4ch.
+  # - 16ch: 2.5e-7
+  # If you prefer "same per-dim KL penalty", set this back to 1e-6.
+  kl_weight: 2.5e-7
+
+  feature:
+    enabled: false
+    weight: 0.0
+    type: "l2"
+    teacher_checkpoint: "outputs/checkpoints/teacher/best.pt"
+    imagenet_pretrained: true
+
+output:
+  root_dir: "outputs/checkpoints/vae"
+
+wandb:
+  enabled: true
+  project: "uwf-vae"
+  name: "vae_ft_16ch_bf16"
+  mode: "online"
+  log_interval_steps: 50
