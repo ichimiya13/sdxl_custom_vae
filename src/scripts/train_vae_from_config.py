@@ -95,6 +95,37 @@ def _kl_loss_from_posterior(posterior) -> "torch.Tensor":
     return kl.mean()
 
 
+def _load_init_report_for_resume(resume_dir: str | Path, state: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Load init report needed to continue stage1 after resume.
+
+    Priority:
+      1) train_state.pt contents (future checkpoints)
+      2) <resume_dir>/init_report.json
+      3) <resume_dir>/../init_report.json   # current v5 writes here
+    """
+    import json
+
+    if isinstance(state, dict):
+        init_report = state.get("init_report", None)
+        if isinstance(init_report, dict):
+            return init_report
+
+        rn = state.get("random_init_param_names", None)
+        if isinstance(rn, list):
+            return {"random_init_param_names": [str(x) for x in rn]}
+
+    resume_dir = Path(resume_dir)
+    for cand in [resume_dir / "init_report.json", resume_dir.parent / "init_report.json"]:
+        if cand.is_file():
+            try:
+                obj = json.loads(cand.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if isinstance(obj, dict):
+                return obj
+    return None
+
+
 def train_from_config(cfg: dict[str, Any], config_path: str | Path) -> None:
     import sys
     import time
@@ -310,6 +341,14 @@ def train_from_config(cfg: dict[str, Any], config_path: str | Path) -> None:
             best_val = state.get("best_val", None)
         else:
             state = None
+
+        # Recover init report so adapter-only (stage1) can continue after resume.
+        resume_init_report = _load_init_report_for_resume(resume_dir, state)
+        if isinstance(resume_init_report, dict):
+            try:
+                vae._sdxl_custom_vae_init = resume_init_report
+            except Exception:
+                pass
     else:
         base_repo_id = str(vae_cfg.get("base_repo_id", vae_cfg.get("repo_id", "stabilityai/sdxl-vae")))
         latent_channels = int(vae_cfg.get("latent_channels", 4))
@@ -445,18 +484,34 @@ def train_from_config(cfg: dict[str, Any], config_path: str | Path) -> None:
         if isinstance(rn, list):
             random_param_names = set(str(x) for x in rn)
 
-    # Only do stage-1 when we are *not* resuming and we actually have
-    # randomly-initialized params (e.g. latent_channels expansion).
     train_stage = 2
     stage1_until_step = 0
-    if (resume_dir is None) and stage1_enabled and (stage1_steps > 0) and (len(random_param_names) > 0):
-        train_stage = 1
-        stage1_until_step = stage1_steps
+    if stage1_enabled and (stage1_steps > 0) and (len(random_param_names) > 0):
+        if resume_dir is None:
+            train_stage = 1
+            stage1_until_step = stage1_steps
+        else:
+            # Continue stage1 if the resumed checkpoint was still in stage1.
+            # For older checkpoints that do not store stage info yet,
+            # infer it from global_step < stage1_steps.
+            saved_stage1_until = stage1_steps
+            saved_stage = 1 if global_step < stage1_steps else 2
+            if isinstance(state, dict):
+                saved_stage1_until = int(state.get("stage1_until_step", stage1_steps))
+                saved_stage = int(state.get("train_stage", 1 if global_step < saved_stage1_until else 2))
+            if saved_stage == 1 and global_step < saved_stage1_until:
+                train_stage = 1
+                stage1_until_step = saved_stage1_until
+
+    if train_stage == 1:
         _set_trainable_params(random_param_names)
         preview_names = ", ".join(sorted(list(random_param_names))[:12])
+        remaining = max(0, int(stage1_until_step - global_step))
+        tag = "[stage1-resume]" if resume_dir is not None else "[stage1]"
         msg = (
-            f"[stage1] training only randomly-initialized params for {stage1_until_step} optimizer steps "
-            f"(trainable params={_count_trainable():,})\n"
+            f"{tag} training only randomly-initialized params for {remaining} more optimizer steps "
+            f"(until global_step={stage1_until_step}, current_step={global_step}, "
+            f"trainable params={_count_trainable():,})\n"
             f"         trainable param examples: {preview_names}"
         )
         if tqdm is not None and use_pbar:
@@ -707,6 +762,9 @@ def train_from_config(cfg: dict[str, Any], config_path: str | Path) -> None:
                 "optimizer": optimizer.state_dict(),
                 "scaler": scaler.state_dict() if scaler is not None else None,
                 "val_metrics": val_metrics,
+                "train_stage": int(train_stage),
+                "stage1_until_step": int(stage1_until_step),
+                "random_init_param_names": sorted(list(random_param_names)),
             }
             torch.save(train_state, last_dir / "train_state.pt")
 
